@@ -22,11 +22,23 @@ Example use:
 	}
 ```
 
+The code is meant to be simple enough to be copied and adapted to any project
+so it can run without using `interface{}`, which would likely help a lot in
+terms of performance. Think of this as a proof of concept showing that it is
+possible to use `sync.RWMutex` the other way around.
+
 ## Improvements
 
 ### Allow writes while flush is running
 
 This would be actually fairly simple, by allocating a new buffer and unlocking
 before running the callback. This would remove a lock and add a new allocation
-instead. If the write is fast enough, locking is likely going to be better.
+instead. If the callback is fast enough however, it will likely be better to
+not duplicate memory.
 
+### Flush pointers after write
+
+Right now, after the callback is called values are kept in the buffer. A
+simple loop setting all entries to nil could fix that, but would require more
+CPU to run. The flush can actually be done from within the callback, so it
+shouldn't be an issue.
