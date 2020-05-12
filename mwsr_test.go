@@ -1,19 +1,16 @@
 package mwsr
 
 import (
-	"log"
 	"sync"
 	"sync/atomic"
 	"testing"
 )
 
 func TestMwsr(t *testing.T) {
-	log.Printf("testing")
-
 	var check uint32
 
 	q := New(128, func(v []interface{}) error {
-		log.Printf("got values: %+v", v)
+		t.Logf("got values: %+v", v)
 		for _, sub := range v {
 			atomic.AddUint32(&check, uint32(sub.(int)))
 		}

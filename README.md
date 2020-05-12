@@ -19,3 +19,12 @@ Example use:
 		go q.Write(i)
 	}
 ```
+
+## Improvements
+
+### Allow writes while flush is running
+
+This would be actually fairly simple, by allocating a new buffer and unlocking
+before running the callback. This would remove a lock and add a new allocation
+instead. If the write is fast enough, locking is likely going to be better.
+
