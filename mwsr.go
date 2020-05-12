@@ -9,12 +9,22 @@ import (
 // Mwsr is an object able to accept multiple writes at the same time, and
 // which will flush to a callback as soon as possible.
 type Mwsr struct {
-	pos uint32                    // pos holds the next write position
-	obj []interface{}             // obj is a slice of objects written and pending flush
-	lk  sync.RWMutex              // lk is a lock used to prevent writes to run during flush
-	cd  *sync.Cond                // cd is used to wake up the flush routing
-	cb  func([]interface{}) error // callback performing the flush
-	err error                     // if an error happened, err will be set and Write will return immediately
+	// obj is a slice of objects written and pending flush
+	obj []interface{}
+
+	// pos holds the next write position
+	pos uint32
+	// lk is a lock used to prevent writes to run during flush
+	lk sync.RWMutex
+
+	// cd is used to wake up the flush routing
+	cd *sync.Cond
+
+	// callback performing the flush
+	cb func([]interface{}) error
+
+	// if an error happened, err will be set and Write will return immediately
+	err error
 }
 
 // New will return a new Mwsr instance after starting a new gorouting to
