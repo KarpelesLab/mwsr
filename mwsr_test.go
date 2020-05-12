@@ -37,4 +37,22 @@ func TestMwsr(t *testing.T) {
 	if check != 45 {
 		t.Errorf("expected check=45, got check=%d", check)
 	}
+
+	// stress testing
+	check = 0
+
+	wg.Add(65536)
+	for i := 0; i < 65536; i++ {
+		go func(i int) {
+			q.Write(i)
+			wg.Done()
+		}(i)
+	}
+
+	wg.Wait()
+	q.Flush()
+
+	if check != 2147450880 {
+		t.Errorf("expected check=2147450880, got check=%d", check)
+	}
 }

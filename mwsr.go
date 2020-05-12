@@ -36,7 +36,7 @@ func (m *Mwsr) Write(v interface{}) error {
 		}
 
 		pos := atomic.AddUint32(&m.pos, 1) - 1
-		if pos > uint32(len(m.obj)) {
+		if pos >= uint32(len(m.obj)) {
 			// too full, attempt to process now
 			m.lk.RUnlock()
 
@@ -61,7 +61,12 @@ func (m *Mwsr) Flush() error {
 }
 
 func (m *Mwsr) doCallback() error {
-	err := m.cb(m.obj[:m.pos])
+	pos := m.pos
+	if pos > uint32(len(m.obj)) {
+		pos = uint32(len(m.obj))
+	}
+
+	err := m.cb(m.obj[:pos])
 	m.pos = 0
 	return err
 }
