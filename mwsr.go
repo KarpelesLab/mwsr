@@ -1,6 +1,7 @@
 package mwsr
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 )
@@ -14,11 +15,15 @@ type Mwsr struct {
 	err error
 }
 
+// New will return a new Mwsr instance after starting a new gorouting to
+// process writes in the background. If the callback returns an error, the
+// goroutine will die and the Write method will return the error.
 func New(siz int, cb func([]interface{}) error) *Mwsr {
 	res := &Mwsr{
 		obj: make([]interface{}, siz),
 		cb:  cb,
 	}
+	// cond is created on the *write* side of the RWMutex
 	res.cd = sync.NewCond(&res.lk)
 
 	go res.processLoop()
@@ -26,12 +31,16 @@ func New(siz int, cb func([]interface{}) error) *Mwsr {
 	return res
 }
 
+// Write a single value to the queue. Multiple calls to Write can be performed
+// from different threads and complete in parallel.
 func (m *Mwsr) Write(v interface{}) error {
 	m.lk.RLock()
-	defer m.lk.RUnlock()
+	// we do not defer RUnlock() because we may switch to a write lock during the process
 
 	for {
 		if m.err != nil {
+			// if m.err is set, it won't be modified, so thread safety is fine
+			m.lk.RUnlock()
 			return m.err
 		}
 
@@ -40,18 +49,51 @@ func (m *Mwsr) Write(v interface{}) error {
 			// too full, attempt to process now
 			m.lk.RUnlock()
 
-			m.processSingle()
+			// switch to full lock
+			m.lk.Lock()
 
-			m.lk.RLock()
-			continue
+			// an error occured since the lock, return it
+			if m.err != nil {
+				m.lk.Unlock()
+				return m.err
+			}
+
+			if m.pos < uint32(len(m.obj)) {
+				// looks like someone else flushed the queue while we acquired the lock.
+				// avoid running the callback now as we don't need to
+				m.obj[m.pos] = v
+				m.pos += 1 // no need for atomic since we hold the write lock
+
+				m.cd.Broadcast()
+				m.lk.Unlock()
+				return nil
+			}
+
+			if err := m.doCallback(); err != nil {
+				// an error occured, give up here
+				m.err = err
+				m.lk.Unlock()
+				return err
+			}
+
+			// at this point, the queue is supposed to be empty
+			m.obj[m.pos] = v
+			m.pos += 1
+
+			m.cd.Broadcast()
+			m.lk.Unlock()
+			return nil
 		}
 
 		m.obj[pos] = v
 		m.cd.Broadcast()
+		m.lk.RUnlock()
 		return nil
 	}
 }
 
+// Flush will force the queue to be flushed now, and return once the queue is
+// empty.
 func (m *Mwsr) Flush() error {
 	m.processSingle()
 
@@ -60,7 +102,17 @@ func (m *Mwsr) Flush() error {
 	return m.err
 }
 
-func (m *Mwsr) doCallback() error {
+// doCallback simply calls the callback after making sure the slice has the
+// right size, then will reset the position. This needs to be called after m.lk
+// has been acquired.
+func (m *Mwsr) doCallback() (e error) {
+	defer func() {
+		// block panic to avoid deadlock
+		if r := recover(); r != nil {
+			e = fmt.Errorf("callback panic occured: %v", r)
+		}
+	}()
+
 	pos := m.pos
 	if pos > uint32(len(m.obj)) {
 		pos = uint32(len(m.obj))
@@ -71,6 +123,8 @@ func (m *Mwsr) doCallback() error {
 	return err
 }
 
+// processSingle performs a single call of the callback after obtaining the
+// lock and checking no pending error exists.
 func (m *Mwsr) processSingle() {
 	m.lk.Lock()
 	defer m.lk.Unlock()
@@ -89,6 +143,8 @@ func (m *Mwsr) processSingle() {
 	}
 }
 
+// processLoop is run in a gorouting by New() and will wait for activity, in
+// order to call the callback method.
 func (m *Mwsr) processLoop() {
 	m.lk.Lock()
 	defer m.lk.Unlock()
