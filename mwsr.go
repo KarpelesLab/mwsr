@@ -14,13 +14,18 @@ type Mwsr struct {
 
 	// pos holds the next write position
 	pos uint32
+
 	// lk is a lock used to prevent writes to run during flush
+	//
+	// multiple RLock can be acquired at the same time, this is used during Write()
+	// only one routine can hold Lock, this is used during flush
 	lk sync.RWMutex
 
-	// cd is used to wake up the flush routing
+	// cd is used to wake up the flush routine after writes
 	cd *sync.Cond
 
 	// callback performing the flush
+	// it will always be called only once at a time
 	cb func([]interface{}) error
 
 	// if an error happened, err will be set and Write will return immediately
