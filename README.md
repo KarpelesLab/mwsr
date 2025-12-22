@@ -1,6 +1,7 @@
 [![GoDoc](https://godoc.org/github.com/KarpelesLab/mwsr?status.svg)](https://godoc.org/github.com/KarpelesLab/mwsr)
 [![Go Report Card](https://goreportcard.com/badge/github.com/KarpelesLab/mwsr)](https://goreportcard.com/report/github.com/KarpelesLab/mwsr)
 [![Build Status](https://github.com/KarpelesLab/mwsr/actions/workflows/test.yml/badge.svg)](https://github.com/KarpelesLab/mwsr/actions/workflows/test.yml)
+[![Coverage Status](https://coveralls.io/repos/github/KarpelesLab/mwsr/badge.svg?branch=master)](https://coveralls.io/github/KarpelesLab/mwsr?branch=master)
 
 # mwsr
 
