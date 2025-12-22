@@ -75,15 +75,9 @@ q := mwsr.New(100, func(v []LogEntry) error {
 The code uses `sync.RWMutex` in an unconventional way:
 
 - Multiple `RLock` can be acquired at the same time - used during `Write()`
-- Only one routine can hold `Lock` - used during flush
+- Only one routine can hold `Lock` - used during buffer swap
 
-This allows multiple concurrent writes while ensuring exclusive access during flush operations.
-
-## Improvements
-
-### Allow writes while flush is running
-
-This would be fairly simple, by allocating a new buffer and unlocking
-before running the callback. This would remove a lock and add a new allocation
-instead. If the callback is fast enough however, it will likely be better to
-not duplicate memory.
+Writes can continue while the flush callback is executing. When a flush starts,
+the current buffer is swapped out and a new buffer is allocated for incoming
+writes. This maximizes throughput by not blocking writers during potentially
+slow callback operations.
