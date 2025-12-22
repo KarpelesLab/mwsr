@@ -32,26 +32,28 @@ func TestBasic(t *testing.T) {
 	wg.Wait()
 	q.Flush()
 
-	if check != 45 {
-		t.Errorf("expected check=45, got check=%d", check)
+	if atomic.LoadUint32(&check) != 45 {
+		t.Errorf("expected check=45, got check=%d", atomic.LoadUint32(&check))
 	}
 }
 
 func TestStress(t *testing.T) {
-	var check uint32
+	var check uint64
+	var items uint64
 
 	q := New(128, func(v []int) error {
+		atomic.AddUint64(&items, uint64(len(v)))
 		for _, sub := range v {
-			atomic.AddUint32(&check, uint32(sub))
+			atomic.AddUint64(&check, uint64(sub))
 		}
 		return nil
 	})
-	defer q.Close()
 
+	n := 65536
 	var wg sync.WaitGroup
-	wg.Add(65536)
+	wg.Add(n)
 
-	for i := 0; i < 65536; i++ {
+	for i := 0; i < n; i++ {
 		go func(i int) {
 			defer wg.Done()
 			q.Write(i)
@@ -60,9 +62,14 @@ func TestStress(t *testing.T) {
 
 	wg.Wait()
 	q.Flush()
+	q.Close()
 
-	if check != 2147450880 {
-		t.Errorf("expected check=2147450880, got check=%d", check)
+	expected := uint64(n * (n - 1) / 2)
+	got := atomic.LoadUint64(&check)
+	gotItems := atomic.LoadUint64(&items)
+
+	if got != expected {
+		t.Errorf("expected sum=%d, got=%d (diff=%d), items=%d/%d", expected, got, int64(expected)-int64(got), gotItems, n)
 	}
 }
 

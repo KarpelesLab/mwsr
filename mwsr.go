@@ -112,14 +112,23 @@ func (m *Mwsr[T]) Write(v T) error {
 		return ErrClosed
 	}
 
-	// make sure we still don't have room in the queue (might have emptied between the locks)
-	if m.pos >= uint32(len(m.obj)) {
-		// the queue is indeed full, flush it now
+	// make sure we have room in the queue, flushing as needed
+	// (loop because doCallback releases lock, allowing other writes to fill the new buffer)
+	for m.pos >= uint32(len(m.obj)) {
 		if err := m.doCallback(); err != nil {
 			// an error occurred, give up here
 			m.err = err
 			m.lk.Unlock()
 			return err
+		}
+		// check for errors/closed that may have occurred while lock was released
+		if m.err != nil {
+			m.lk.Unlock()
+			return m.err
+		}
+		if m.closed {
+			m.lk.Unlock()
+			return ErrClosed
 		}
 	}
 
