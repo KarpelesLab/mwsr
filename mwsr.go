@@ -11,8 +11,7 @@ import (
 var ErrClosed = errors.New("mwsr: queue is closed")
 
 // Mwsr is an object able to accept multiple writes at the same time, and
-// which will flush to a callback as soon as possible. Writes can continue
-// while the callback is executing.
+// which will flush to a callback as soon as possible.
 type Mwsr[T any] struct {
 	// obj is a slice of objects written and pending flush
 	obj []T
@@ -20,14 +19,11 @@ type Mwsr[T any] struct {
 	// pos holds the next write position
 	pos uint32
 
-	// lk is a lock used to prevent writes to run during buffer swap
+	// lk is a lock used to prevent writes to run during flush
 	//
 	// multiple RLock can be acquired at the same time, this is used during Write()
-	// only one routine can hold Lock, this is used during flush setup
+	// only one routine can hold Lock, this is used during flush
 	lk sync.RWMutex
-
-	// cbLk ensures only one callback runs at a time
-	cbLk sync.Mutex
 
 	// cd is used to wake up the flush routine after writes
 	cd *sync.Cond
@@ -70,8 +66,7 @@ func New[T any](size int, cb func([]T) error) *Mwsr[T] {
 }
 
 // Write a single value to the queue. Multiple calls to Write can be performed
-// from different threads and complete in parallel, even while a flush callback
-// is executing.
+// from different threads and complete in parallel.
 func (m *Mwsr[T]) Write(v T) error {
 	m.lk.RLock()
 	// we do not defer RUnlock() because we may switch to a write lock during the process
@@ -112,23 +107,14 @@ func (m *Mwsr[T]) Write(v T) error {
 		return ErrClosed
 	}
 
-	// make sure we have room in the queue, flushing as needed
-	// (loop because doCallback releases lock, allowing other writes to fill the new buffer)
-	for m.pos >= uint32(len(m.obj)) {
+	// make sure we still don't have room in the queue (might have emptied between the locks)
+	if m.pos >= uint32(len(m.obj)) {
+		// the queue is indeed full, flush it now
 		if err := m.doCallback(); err != nil {
 			// an error occurred, give up here
 			m.err = err
 			m.lk.Unlock()
 			return err
-		}
-		// check for errors/closed that may have occurred while lock was released
-		if m.err != nil {
-			m.lk.Unlock()
-			return m.err
-		}
-		if m.closed {
-			m.lk.Unlock()
-			return ErrClosed
 		}
 	}
 
@@ -186,50 +172,32 @@ func (m *Mwsr[T]) Close() error {
 	return err
 }
 
-// doCallback prepares the buffer for flushing, releases the lock to allow
-// writes during the callback, then calls the callback. The lock is re-acquired
-// before returning. This must be called while holding m.lk.
+// doCallback simply calls the callback after making sure the slice has the
+// right size, then will reset the position. This needs to be called after m.lk
+// has been acquired.
 func (m *Mwsr[T]) doCallback() (e error) {
+	defer func() {
+		// block panic to avoid deadlock
+		if r := recover(); r != nil {
+			e = fmt.Errorf("callback panic occurred: %v", r)
+		}
+	}()
+
 	pos := m.pos
 	if pos > uint32(len(m.obj)) {
 		pos = uint32(len(m.obj))
 	}
-	if pos == 0 {
-		return nil
+
+	err := m.cb(m.obj[:pos])
+
+	// Clear slice elements to allow garbage collection
+	var zero T
+	for i := uint32(0); i < pos; i++ {
+		m.obj[i] = zero
 	}
 
-	// Take the current buffer for flushing
-	toFlush := m.obj[:pos]
-	bufSize := cap(m.obj)
-
-	// Allocate a new buffer for incoming writes
-	m.obj = make([]T, bufSize)
 	m.pos = 0
-
-	// Release main lock to allow writes during callback
-	m.lk.Unlock()
-
-	// Serialize callback execution (only one callback at a time)
-	m.cbLk.Lock()
-
-	// Call callback with panic recovery
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				e = fmt.Errorf("callback panic occurred: %v", r)
-			}
-		}()
-		e = m.cb(toFlush)
-	}()
-
-	m.cbLk.Unlock()
-
-	// Re-acquire main lock before returning
-	m.lk.Lock()
-
-	// toFlush slice will be garbage collected
-
-	return e
+	return err
 }
 
 // processSingle performs a single call of the callback after obtaining the
