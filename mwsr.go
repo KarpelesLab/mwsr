@@ -1,16 +1,20 @@
 package mwsr
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 )
 
+// ErrClosed is returned when Write is called on a closed Mwsr.
+var ErrClosed = errors.New("mwsr: queue is closed")
+
 // Mwsr is an object able to accept multiple writes at the same time, and
 // which will flush to a callback as soon as possible.
-type Mwsr struct {
+type Mwsr[T any] struct {
 	// obj is a slice of objects written and pending flush
-	obj []interface{}
+	obj []T
 
 	// pos holds the next write position
 	pos uint32
@@ -26,19 +30,32 @@ type Mwsr struct {
 
 	// callback performing the flush
 	// it will always be called only once at a time
-	cb func([]interface{}) error
+	cb func([]T) error
 
 	// if an error happened, err will be set and Write will return immediately
 	err error
+
+	// closed indicates the queue has been closed
+	closed bool
+
+	// done is closed when the background goroutine exits
+	done chan struct{}
 }
 
-// New will return a new Mwsr instance after starting a new gorouting to
+// New will return a new Mwsr instance after starting a new goroutine to
 // process writes in the background. If the callback returns an error, the
 // goroutine will die and the Write method will return the error.
-func New(siz int, cb func([]interface{}) error) *Mwsr {
-	res := &Mwsr{
-		obj: make([]interface{}, siz),
-		cb:  cb,
+//
+// The size parameter specifies the buffer size. If size < 1, it defaults to 1.
+func New[T any](size int, cb func([]T) error) *Mwsr[T] {
+	if size < 1 {
+		size = 1
+	}
+
+	res := &Mwsr[T]{
+		obj:  make([]T, size),
+		cb:   cb,
+		done: make(chan struct{}),
 	}
 	// cond is created on the *write* side of the RWMutex
 	res.cd = sync.NewCond(&res.lk)
@@ -50,7 +67,7 @@ func New(siz int, cb func([]interface{}) error) *Mwsr {
 
 // Write a single value to the queue. Multiple calls to Write can be performed
 // from different threads and complete in parallel.
-func (m *Mwsr) Write(v interface{}) error {
+func (m *Mwsr[T]) Write(v T) error {
 	m.lk.RLock()
 	// we do not defer RUnlock() because we may switch to a write lock during the process
 
@@ -60,12 +77,17 @@ func (m *Mwsr) Write(v interface{}) error {
 		return m.err
 	}
 
+	if m.closed {
+		m.lk.RUnlock()
+		return ErrClosed
+	}
+
 	// generate new atomic value, check if it fits
 	pos := atomic.AddUint32(&m.pos, 1) - 1
 	if pos < uint32(len(m.obj)) {
 		// it fits, store and return
 		m.obj[pos] = v
-		m.cd.Broadcast()
+		m.cd.Signal()
 		m.lk.RUnlock()
 		return nil
 	}
@@ -80,11 +102,16 @@ func (m *Mwsr) Write(v interface{}) error {
 		return m.err
 	}
 
+	if m.closed {
+		m.lk.Unlock()
+		return ErrClosed
+	}
+
 	// make sure we still don't have room in the queue (might have emptied between the locks)
 	if m.pos >= uint32(len(m.obj)) {
 		// the queue is indeed full, flush it now
 		if err := m.doCallback(); err != nil {
-			// an error occured, give up here
+			// an error occurred, give up here
 			m.err = err
 			m.lk.Unlock()
 			return err
@@ -95,14 +122,14 @@ func (m *Mwsr) Write(v interface{}) error {
 	m.obj[m.pos] = v
 	m.pos += 1 // no need for atomic since we hold the write lock
 
-	m.cd.Broadcast()
+	m.cd.Signal()
 	m.lk.Unlock()
 	return nil
 }
 
 // Flush will force the queue to be flushed now, and return once the queue is
 // empty.
-func (m *Mwsr) Flush() error {
+func (m *Mwsr[T]) Flush() error {
 	m.processSingle()
 
 	m.lk.RLock()
@@ -110,14 +137,49 @@ func (m *Mwsr) Flush() error {
 	return m.err
 }
 
+// Close stops the background goroutine and flushes any remaining items.
+// After Close is called, all subsequent Write calls will return ErrClosed.
+// Close is safe to call multiple times.
+func (m *Mwsr[T]) Close() error {
+	m.lk.Lock()
+
+	if m.closed {
+		m.lk.Unlock()
+		// Wait for goroutine to finish if already closing
+		<-m.done
+		return m.err
+	}
+
+	m.closed = true
+
+	// Flush remaining items if no error
+	if m.err == nil && m.pos > 0 {
+		if err := m.doCallback(); err != nil {
+			m.err = err
+		}
+	}
+
+	// Wake up the processLoop so it can exit
+	m.cd.Signal()
+	m.lk.Unlock()
+
+	// Wait for the goroutine to finish
+	<-m.done
+
+	m.lk.RLock()
+	err := m.err
+	m.lk.RUnlock()
+	return err
+}
+
 // doCallback simply calls the callback after making sure the slice has the
 // right size, then will reset the position. This needs to be called after m.lk
 // has been acquired.
-func (m *Mwsr) doCallback() (e error) {
+func (m *Mwsr[T]) doCallback() (e error) {
 	defer func() {
 		// block panic to avoid deadlock
 		if r := recover(); r != nil {
-			e = fmt.Errorf("callback panic occured: %v", r)
+			e = fmt.Errorf("callback panic occurred: %v", r)
 		}
 	}()
 
@@ -127,13 +189,20 @@ func (m *Mwsr) doCallback() (e error) {
 	}
 
 	err := m.cb(m.obj[:pos])
+
+	// Clear slice elements to allow garbage collection
+	var zero T
+	for i := uint32(0); i < pos; i++ {
+		m.obj[i] = zero
+	}
+
 	m.pos = 0
 	return err
 }
 
 // processSingle performs a single call of the callback after obtaining the
 // lock and checking no pending error exists.
-func (m *Mwsr) processSingle() {
+func (m *Mwsr[T]) processSingle() {
 	m.lk.Lock()
 	defer m.lk.Unlock()
 
@@ -147,18 +216,19 @@ func (m *Mwsr) processSingle() {
 
 	if err := m.doCallback(); err != nil {
 		m.err = err
-		m.cd.Broadcast()
 	}
 }
 
-// processLoop is run in a gorouting by New() and will wait for activity, in
+// processLoop is run in a goroutine by New() and will wait for activity, in
 // order to call the callback method.
-func (m *Mwsr) processLoop() {
+func (m *Mwsr[T]) processLoop() {
+	defer close(m.done)
+
 	m.lk.Lock()
 	defer m.lk.Unlock()
 
 	for {
-		if m.err != nil {
+		if m.err != nil || m.closed {
 			return
 		}
 

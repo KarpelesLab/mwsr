@@ -1,4 +1,6 @@
 [![GoDoc](https://godoc.org/github.com/KarpelesLab/mwsr?status.svg)](https://godoc.org/github.com/KarpelesLab/mwsr)
+[![Go Report Card](https://goreportcard.com/badge/github.com/KarpelesLab/mwsr)](https://goreportcard.com/report/github.com/KarpelesLab/mwsr)
+[![Build Status](https://github.com/KarpelesLab/mwsr/actions/workflows/test.yml/badge.svg)](https://github.com/KarpelesLab/mwsr/actions/workflows/test.yml)
 
 # mwsr
 
@@ -8,37 +10,80 @@ This is a simple lib that allows multiple threads to write in parallel to a
 single queue, and the queue to be flushed as soon as possible, possibly with
 multiple values inside.
 
-Example use:
+## Installation
 
-```go
-	q := mwsr.New(128, func(v []interface{}) error {
-		log.Printf("got values: %+v", v)
-		return nil
-	})
-
-	// this will typically result in less than 10 calls to log.Printf
-	for i := 0; i < 10; i++ {
-		go q.Write(i)
-	}
+```bash
+go get github.com/KarpelesLab/mwsr
 ```
 
-The code is meant to be simple enough to be copied and adapted to any project
-so it can run without using `interface{}`, which would likely help a lot in
-terms of performance. Think of this as a proof of concept showing that it is
-possible to use `sync.RWMutex` the other way around.
+Requires Go 1.21 or later.
+
+## Usage
+
+```go
+q := mwsr.New(128, func(v []int) error {
+    log.Printf("got values: %+v", v)
+    return nil
+})
+defer q.Close() // Always close to prevent goroutine leaks
+
+// This will typically result in less than 10 calls to log.Printf
+for i := 0; i < 10; i++ {
+    go q.Write(i)
+}
+
+// Optionally force a flush
+q.Flush()
+```
+
+### Generic Types
+
+The library uses Go generics, so you can use any type:
+
+```go
+// With strings
+q := mwsr.New(100, func(v []string) error {
+    for _, s := range v {
+        fmt.Println(s)
+    }
+    return nil
+})
+
+// With custom structs
+type LogEntry struct {
+    Level   string
+    Message string
+}
+
+q := mwsr.New(100, func(v []LogEntry) error {
+    for _, entry := range v {
+        log.Printf("[%s] %s", entry.Level, entry.Message)
+    }
+    return nil
+})
+```
+
+## API
+
+- `New[T any](size int, cb func([]T) error) *Mwsr[T]` - Create a new queue with the given buffer size and callback
+- `Write(v T) error` - Write a value to the queue (thread-safe)
+- `Flush() error` - Force flush the queue and wait for completion
+- `Close() error` - Flush remaining items and stop the background goroutine
+
+## Design
+
+The code uses `sync.RWMutex` in an unconventional way:
+
+- Multiple `RLock` can be acquired at the same time - used during `Write()`
+- Only one routine can hold `Lock` - used during flush
+
+This allows multiple concurrent writes while ensuring exclusive access during flush operations.
 
 ## Improvements
 
 ### Allow writes while flush is running
 
-This would be actually fairly simple, by allocating a new buffer and unlocking
+This would be fairly simple, by allocating a new buffer and unlocking
 before running the callback. This would remove a lock and add a new allocation
 instead. If the callback is fast enough however, it will likely be better to
 not duplicate memory.
-
-### Flush pointers after write
-
-Right now, after the callback is called values are kept in the buffer. A
-simple loop setting all entries to nil could fix that, but would require more
-CPU to run. The flush can actually be done from within the callback, so it
-shouldn't be an issue.
