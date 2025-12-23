@@ -715,8 +715,8 @@ func TestBufferWriteVMixed(t *testing.T) {
 
 	// Mix of sizes that will trigger various code paths
 	buf.WriteV([][]int{
-		{1, 2},      // small, fits
-		{3, 4, 5},   // small, fits
+		{1, 2},               // small, fits
+		{3, 4, 5},            // small, fits
 		{6, 7, 8, 9, 10, 11}, // will trigger flush
 	})
 
