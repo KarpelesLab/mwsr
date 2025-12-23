@@ -482,7 +482,7 @@ func TestBufferGenericTypes(t *testing.T) {
 
 	// Test with pointers (GC clearing matters here)
 	type bigStruct struct {
-		data [1024]byte
+		_ [1024]byte
 	}
 
 	var ptrCount int
