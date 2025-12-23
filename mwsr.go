@@ -7,12 +7,22 @@ import (
 	"sync/atomic"
 )
 
-// ErrClosed is returned when Write is called on a closed Mwsr.
+// ErrClosed is returned when Write is called on a closed AsyncBuffer.
 var ErrClosed = errors.New("mwsr: queue is closed")
 
-// Mwsr is an object able to accept multiple writes at the same time, and
-// which will flush to a callback as soon as possible.
-type Mwsr[T any] struct {
+// Mwsr is a type alias for AsyncBuffer for backwards compatibility.
+// Deprecated: Use AsyncBuffer instead.
+type Mwsr[T any] = AsyncBuffer[T]
+
+// New is an alias for NewAsyncBuffer for backwards compatibility.
+// Deprecated: Use NewAsyncBuffer instead.
+func New[T any](size int, cb func([]T) error) *AsyncBuffer[T] {
+	return NewAsyncBuffer(size, cb)
+}
+
+// AsyncBuffer is an object able to accept multiple writes at the same time, and
+// which will flush to a callback as soon as possible using a background goroutine.
+type AsyncBuffer[T any] struct {
 	// obj is a slice of objects written and pending flush
 	obj []T
 
@@ -42,17 +52,17 @@ type Mwsr[T any] struct {
 	done chan struct{}
 }
 
-// New will return a new Mwsr instance after starting a new goroutine to
+// NewAsyncBuffer will return a new AsyncBuffer instance after starting a new goroutine to
 // process writes in the background. If the callback returns an error, the
 // goroutine will die and the Write method will return the error.
 //
 // The size parameter specifies the buffer size. If size < 1, it defaults to 1.
-func New[T any](size int, cb func([]T) error) *Mwsr[T] {
+func NewAsyncBuffer[T any](size int, cb func([]T) error) *AsyncBuffer[T] {
 	if size < 1 {
 		size = 1
 	}
 
-	res := &Mwsr[T]{
+	res := &AsyncBuffer[T]{
 		obj:  make([]T, size),
 		cb:   cb,
 		done: make(chan struct{}),
@@ -67,7 +77,7 @@ func New[T any](size int, cb func([]T) error) *Mwsr[T] {
 
 // Write a single value to the queue. Multiple calls to Write can be performed
 // from different threads and complete in parallel.
-func (m *Mwsr[T]) Write(v T) error {
+func (m *AsyncBuffer[T]) Write(v T) error {
 	m.lk.RLock()
 	// we do not defer RUnlock() because we may switch to a write lock during the process
 
@@ -92,7 +102,8 @@ func (m *Mwsr[T]) Write(v T) error {
 		return nil
 	}
 
-	// too full, attempt to process now. First, let's switch to write lock
+	// too full - give back the slot we reserved
+	atomic.AddUint32(&m.pos, ^uint32(0))
 	m.lk.RUnlock()
 	m.lk.Lock()
 
@@ -129,7 +140,7 @@ func (m *Mwsr[T]) Write(v T) error {
 
 // Flush will force the queue to be flushed now, and return once the queue is
 // empty.
-func (m *Mwsr[T]) Flush() error {
+func (m *AsyncBuffer[T]) Flush() error {
 	m.processSingle()
 
 	m.lk.RLock()
@@ -140,7 +151,7 @@ func (m *Mwsr[T]) Flush() error {
 // Close stops the background goroutine and flushes any remaining items.
 // After Close is called, all subsequent Write calls will return ErrClosed.
 // Close is safe to call multiple times.
-func (m *Mwsr[T]) Close() error {
+func (m *AsyncBuffer[T]) Close() error {
 	m.lk.Lock()
 
 	if m.closed {
@@ -175,7 +186,7 @@ func (m *Mwsr[T]) Close() error {
 // doCallback simply calls the callback after making sure the slice has the
 // right size, then will reset the position. This needs to be called after m.lk
 // has been acquired.
-func (m *Mwsr[T]) doCallback() (e error) {
+func (m *AsyncBuffer[T]) doCallback() (e error) {
 	defer func() {
 		// block panic to avoid deadlock
 		if r := recover(); r != nil {
@@ -191,10 +202,7 @@ func (m *Mwsr[T]) doCallback() (e error) {
 	err := m.cb(m.obj[:pos])
 
 	// Clear slice elements to allow garbage collection
-	var zero T
-	for i := uint32(0); i < pos; i++ {
-		m.obj[i] = zero
-	}
+	clear(m.obj[:pos])
 
 	m.pos = 0
 	return err
@@ -202,7 +210,7 @@ func (m *Mwsr[T]) doCallback() (e error) {
 
 // processSingle performs a single call of the callback after obtaining the
 // lock and checking no pending error exists.
-func (m *Mwsr[T]) processSingle() {
+func (m *AsyncBuffer[T]) processSingle() {
 	m.lk.Lock()
 	defer m.lk.Unlock()
 
@@ -219,9 +227,9 @@ func (m *Mwsr[T]) processSingle() {
 	}
 }
 
-// processLoop is run in a goroutine by New() and will wait for activity, in
+// processLoop is run in a goroutine by NewAsyncBuffer() and will wait for activity, in
 // order to call the callback method.
-func (m *Mwsr[T]) processLoop() {
+func (m *AsyncBuffer[T]) processLoop() {
 	defer close(m.done)
 
 	m.lk.Lock()
