@@ -14,7 +14,7 @@ jobs:
         go-version: ['1.23', '1.24', '1.25']
         include:
           - go-version: '1.23'
-            goexperiment: 'aliastypeparams'
+            godebug: 'gotypesalias=1'
 
     steps:
       - uses: actions/checkout@v4
@@ -27,22 +27,22 @@ jobs:
       - name: Build
         run: go build -v ./...
         env:
-          GOEXPERIMENT: ${{ matrix.goexperiment }}
+          GODEBUG: ${{ matrix.godebug }}
 
       - name: Test
         run: go test -v ./...
         env:
-          GOEXPERIMENT: ${{ matrix.goexperiment }}
+          GODEBUG: ${{ matrix.godebug }}
 
       - name: Test with race detector
         run: go test -race -v ./...
         env:
-          GOEXPERIMENT: ${{ matrix.goexperiment }}
+          GODEBUG: ${{ matrix.godebug }}
 
       - name: Benchmark
         run: go test -bench=. -benchmem ./...
         env:
-          GOEXPERIMENT: ${{ matrix.goexperiment }}
+          GODEBUG: ${{ matrix.godebug }}
 
   coverage:
     runs-on: ubuntu-latest
